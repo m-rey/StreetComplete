@@ -1,8 +1,12 @@
 package de.westnordost.streetcomplete.map.tangram
 
+import android.animation.TimeAnimator
+import android.content.ContentResolver
 import android.graphics.Bitmap
 import android.graphics.PointF
 import android.graphics.RectF
+import android.os.Handler
+import android.os.Looper
 import android.view.animation.AccelerateDecelerateInterpolator
 import android.view.animation.Interpolator
 import com.mapzen.tangram.*
@@ -34,8 +38,8 @@ import kotlin.math.pow
  *      <li>Use LatLon instead of LngLat</li>
  *  </ul>
  *  */
-class KtMapController(private val c: MapController) {
-    private val cameraManager = CameraManager(c)
+class KtMapController(private val c: MapController, contentResolver: ContentResolver) {
+    private val cameraManager = CameraManager(c, contentResolver)
     private val markerManager = MarkerManager(c)
     private val gestureManager = TouchGestureManager(c)
 
@@ -45,7 +49,10 @@ class KtMapController(private val c: MapController) {
     private val pickLabelContinuations = ConcurrentLinkedQueue<Continuation<LabelPickResult?>>()
     private val featurePickContinuations = ConcurrentLinkedQueue<Continuation<FeaturePickResult?>>()
 
-    private var mapChangeListener: MapChangeListener? = null
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private var mapChangingListener: MapChangingListener? = null
+
+    private val flingAnimator: TimeAnimator = TimeAnimator()
 
     init {
         c.setSceneLoadListener { sceneId, sceneError ->
@@ -66,35 +73,52 @@ class KtMapController(private val c: MapController) {
             featurePickContinuations.poll()?.resume(featurePickResult)
         }
 
+        flingAnimator.setTimeListener { _, _, _ ->
+            mapChangingListener?.onMapIsChanging()
+        }
+
         cameraManager.listener = object : CameraManager.AnimationsListener {
             override fun onAnimationsStarted() {
-                mapChangeListener?.onRegionWillChange(true)
+                mapChangingListener?.onMapWillChange()
             }
 
             override fun onAnimating() {
-                mapChangeListener?.onRegionIsChanging()
+                mapChangingListener?.onMapIsChanging()
             }
 
             override fun onAnimationsEnded() {
-                mapChangeListener?.onRegionDidChange(true)
+                mapChangingListener?.onMapDidChange()
             }
         }
 
         c.setMapChangeListener(object : MapChangeListener {
-            override fun onViewComplete() {
-                mapChangeListener?.onViewComplete()
-            }
+            override fun onViewComplete() { /* not interested*/ }
 
             override fun onRegionWillChange(animated: Boolean) {
-                if (!cameraManager.isAnimating) mapChangeListener?.onRegionWillChange(false)
+                // workaround for https://github.com/tangrams/tangram-es/issues/2157 : explicitly post on main thread
+                mainHandler.post {
+                    if (!cameraManager.isAnimating) {
+                        mapChangingListener?.onMapWillChange()
+                        if (animated) flingAnimator.start()
+                    }
+                }
             }
 
             override fun onRegionIsChanging() {
-                if (!cameraManager.isAnimating) mapChangeListener?.onRegionIsChanging()
+                // workaround for https://github.com/tangrams/tangram-es/issues/2157
+                mainHandler.post {
+                    if (!cameraManager.isAnimating) mapChangingListener?.onMapIsChanging()
+                }
             }
 
             override fun onRegionDidChange(animated: Boolean) {
-                if (!cameraManager.isAnimating) mapChangeListener?.onRegionDidChange(false)
+                // workaround for https://github.com/tangrams/tangram-es/issues/2157
+                mainHandler.post {
+                    if (!cameraManager.isAnimating) {
+                        mapChangingListener?.onMapDidChange()
+                        if (animated) flingAnimator.end()
+                    }
+                }
             }
         })
     }
@@ -130,11 +154,6 @@ class KtMapController(private val c: MapController) {
 
     fun updateCameraPosition(duration: Long = 0, interpolator: Interpolator = defaultInterpolator, update: CameraUpdate) {
         cameraManager.updateCamera(duration, interpolator, update)
-        // workaround https://github.com/tangrams/tangram-es/issues/2129
-        if (duration == 0L) {
-            mapChangeListener?.onRegionIsChanging()
-            mapChangeListener?.onRegionDidChange(false)
-        }
     }
 
     fun setCameraPosition(camera: CameraPosition) {
@@ -222,7 +241,7 @@ class KtMapController(private val c: MapController) {
         val zoomDeltaX = log10(screenWidth / objectWidth) / log10(2.0)
         val zoomDeltaY = log10(screenHeight / objectHeight) / log10(2.0)
         val zoomDelta = min(zoomDeltaX, zoomDeltaY)
-        return max( 1.0, min(currentZoom + zoomDelta, 19.0)).toFloat()
+        return max( 1.0, min(currentZoom + zoomDelta, 21.0)).toFloat()
     }
 
     fun getLatLonThatCentersLatLon(position: LatLon, padding: RectF, zoom: Float = cameraPosition.zoom): LatLon? {
@@ -274,7 +293,7 @@ class KtMapController(private val c: MapController) {
         c.pickFeature(posX, posY)
     }
 
-    fun setMapChangeListener(listener: MapChangeListener?) { mapChangeListener = listener }
+    fun setMapChangingListener(listener: MapChangingListener?) { mapChangingListener = listener }
 
     /* -------------------------------------- Touch input --------------------------------------- */
 
@@ -334,8 +353,14 @@ suspend fun MapView.initMap(
     suspendCoroutine<KtMapController?> { cont ->
         getMapAsync(MapView.MapReadyCallback { mapController ->
             cont.resume(mapController?.let {
-                KtMapController(it)
+                KtMapController(it, context.contentResolver)
             })
         }, glViewHolderFactory, httpHandler)
     }
+
+interface MapChangingListener {
+    fun onMapWillChange()
+    fun onMapIsChanging()
+    fun onMapDidChange()
+}
 

@@ -5,14 +5,13 @@ import android.content.Context;
 import android.content.SharedPreferences;
 import android.content.res.AssetManager;
 import android.content.res.Resources;
-import android.preference.PreferenceManager;
 
 import javax.inject.Singleton;
 
+import androidx.preference.PreferenceManager;
 import dagger.Module;
 import dagger.Provides;
 import de.westnordost.streetcomplete.location.LocationRequestFragment;
-import de.westnordost.streetcomplete.oauth.OsmOAuthDialogFragment;
 import de.westnordost.streetcomplete.sound.SoundFx;
 import de.westnordost.streetcomplete.tools.CrashReportExceptionHandler;
 
@@ -59,11 +58,6 @@ public class ApplicationModule
 	@Provides @Singleton public static CrashReportExceptionHandler serializer(Context ctx)
 	{
 		return new CrashReportExceptionHandler(ctx);
-	}
-
-	@Provides public static OsmOAuthDialogFragment osmOAuthFragment()
-	{
-		return new OsmOAuthDialogFragment();
 	}
 
 	@Provides public SoundFx soundFx()

@@ -4,10 +4,11 @@ import android.animation.AnimatorInflater
 import android.content.res.Configuration
 import android.graphics.PointF
 import android.graphics.drawable.Animatable
+import android.os.Build
 import android.os.Bundle
-import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import android.view.WindowInsets
 import android.view.animation.AnimationUtils
 import android.widget.RelativeLayout
 import androidx.annotation.UiThread
@@ -21,11 +22,11 @@ import de.westnordost.osmapi.map.data.Way
 import de.westnordost.streetcomplete.Injector
 
 import de.westnordost.streetcomplete.R
-import de.westnordost.streetcomplete.data.QuestGroup
-import de.westnordost.streetcomplete.data.osm.ElementPolylinesGeometry
-import de.westnordost.streetcomplete.data.osm.changes.SplitAtLinePosition
-import de.westnordost.streetcomplete.data.osm.changes.SplitAtPoint
-import de.westnordost.streetcomplete.data.osm.changes.SplitPolylineAtPosition
+import de.westnordost.streetcomplete.data.quest.QuestGroup
+import de.westnordost.streetcomplete.data.osm.elementgeometry.ElementPolylinesGeometry
+import de.westnordost.streetcomplete.data.osm.splitway.SplitAtLinePosition
+import de.westnordost.streetcomplete.data.osm.splitway.SplitAtPoint
+import de.westnordost.streetcomplete.data.osm.splitway.SplitPolylineAtPosition
 import de.westnordost.streetcomplete.ktx.*
 import de.westnordost.streetcomplete.sound.SoundFx
 import de.westnordost.streetcomplete.util.alongTrackDistanceTo
@@ -34,7 +35,9 @@ import de.westnordost.streetcomplete.util.distanceTo
 import kotlinx.android.synthetic.main.fragment_split_way.*
 import javax.inject.Inject
 
-class SplitWayFragment : Fragment(), IsCloseableBottomSheet, IsShowingQuestDetails {
+/** Fragment that lets the user split an OSM way */
+class SplitWayFragment
+    : Fragment(R.layout.fragment_split_way), IsCloseableBottomSheet, IsShowingQuestDetails {
 
 
     private val splits: MutableList<Pair<SplitPolylineAtPosition, LatLon>> = mutableListOf()
@@ -65,20 +68,19 @@ class SplitWayFragment : Fragment(), IsCloseableBottomSheet, IsShowingQuestDetai
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        osmQuestId = arguments!!.getLong(ARG_QUEST_ID)
-        way = arguments!!.getSerializable(ARG_WAY) as Way
-        val elementGeometry = arguments!!.getSerializable(ARG_ELEMENT_GEOMETRY) as ElementPolylinesGeometry
+        val args = requireArguments()
+        osmQuestId = args.getLong(ARG_QUEST_ID)
+        way = args.getSerializable(ARG_WAY) as Way
+        val elementGeometry = args.getSerializable(ARG_ELEMENT_GEOMETRY) as ElementPolylinesGeometry
         positions = elementGeometry.polylines.single().map { OsmLatLon(it.latitude, it.longitude) }
         soundFx.prepare(R.raw.snip)
         soundFx.prepare(R.raw.plop2)
     }
 
-    override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View? {
-        return inflater.inflate(R.layout.fragment_split_way, container, false)
-    }
-
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
+
+        setupFittingToSystemWindowInsets()
 
         splitWayRoot.setOnTouchListener { _, event ->
             clickPos = PointF(event.x, event.y)
@@ -99,12 +101,29 @@ class SplitWayFragment : Fragment(), IsCloseableBottomSheet, IsShowingQuestDetai
         }
     }
 
+    private fun setupFittingToSystemWindowInsets() {
+        if (Build.VERSION.SDK_INT >= 21) {
+            view?.setOnApplyWindowInsetsListener { v: View, insets: WindowInsets ->
+
+                bottomSheetContainer.updateLayoutParams<ViewGroup.MarginLayoutParams> {
+                    setMargins(
+                        insets.systemWindowInsetLeft,
+                        insets.systemWindowInsetTop,
+                        insets.systemWindowInsetRight,
+                        insets.systemWindowInsetBottom
+                    )
+                }
+
+                insets
+            }
+        }
+    }
+
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
         // see rant comment in AbstractBottomSheetFragment
         resources.updateConfiguration(newConfig, resources.displayMetrics)
 
-        bottomSheetContainer.setBackgroundResource(R.drawable.speechbubbles_gradient_background)
         bottomSheetContainer.updateLayoutParams { width = resources.getDimensionPixelSize(R.dimen.quest_form_width) }
     }
 
@@ -149,6 +168,7 @@ class SplitWayFragment : Fragment(), IsCloseableBottomSheet, IsShowingQuestDetai
         // show toast only if it is possible to zoom in further
         if (splitWayCandidates.size > 1 && clickAreaSizeInMeters > CLICK_AREA_SIZE_AT_MAX_ZOOM) {
             context?.toast(R.string.quest_split_way_too_imprecise)
+            return true
         }
         val splitWay = splitWayCandidates.minBy { it.pos.distanceTo(position) }!!
         val splitPosition = splitWay.pos

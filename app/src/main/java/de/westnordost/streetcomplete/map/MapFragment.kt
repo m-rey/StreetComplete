@@ -2,8 +2,10 @@ package de.westnordost.streetcomplete.map
 
 import android.app.Activity
 import android.content.res.Configuration
+import android.graphics.Point
 import android.graphics.PointF
 import android.graphics.RectF
+import android.os.Build
 import android.os.Bundle
 import android.util.Log
 import android.view.LayoutInflater
@@ -11,28 +13,37 @@ import android.view.View
 import android.view.ViewGroup
 import android.view.animation.AccelerateDecelerateInterpolator
 import android.view.animation.Interpolator
+import androidx.annotation.CallSuper
 import androidx.core.content.edit
+import androidx.core.view.updateLayoutParams
 import androidx.fragment.app.Fragment
 import androidx.preference.PreferenceManager
 import com.mapzen.tangram.*
 import com.mapzen.tangram.TouchInput.*
+import com.mapzen.tangram.networking.DefaultHttpHandler
 import com.mapzen.tangram.networking.HttpHandler
 import de.westnordost.osmapi.map.data.BoundingBox
 import de.westnordost.osmapi.map.data.LatLon
 import de.westnordost.osmapi.map.data.OsmLatLon
+import de.westnordost.streetcomplete.ApplicationConstants
 import de.westnordost.streetcomplete.BuildConfig.MAPZEN_API_KEY
 import de.westnordost.streetcomplete.Prefs
 import de.westnordost.streetcomplete.R
+import de.westnordost.streetcomplete.ktx.awaitLayout
 import de.westnordost.streetcomplete.ktx.containsAll
 import de.westnordost.streetcomplete.map.tangram.*
 import de.westnordost.streetcomplete.map.tangram.CameraPosition
 import de.westnordost.streetcomplete.map.tangram.CameraUpdate
+import kotlinx.android.synthetic.main.fragment_map.*
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
+import okhttp3.*
+import okhttp3.internal.Version
 import java.io.File
 import java.util.*
+import java.util.concurrent.TimeUnit
 import kotlin.Exception
 
 /** Manages a map that remembers its last location*/
@@ -41,7 +52,8 @@ open class MapFragment : Fragment(),
     TapResponder, DoubleTapResponder, LongPressResponder,
     PanResponder, ScaleResponder, ShoveResponder, RotateResponder {
 
-    private lateinit var mapView: MapView
+    protected lateinit var mapView: MapView
+    private set
 
     protected var controller: KtMapController? = null
 
@@ -57,9 +69,11 @@ open class MapFragment : Fragment(),
         /** Called during camera animation and while the map is being controlled by a user */
         fun onMapIsChanging(position: LatLon, rotation: Float, tilt: Float, zoom: Float)
         /** Called after camera animation or after the map was controlled by a user */
-        fun onMapDidChange(position: LatLon, rotation: Float, tilt: Float, zoom: Float, animated: Boolean)
+        fun onMapDidChange(position: LatLon, rotation: Float, tilt: Float, zoom: Float)
         /** Called when the user begins to pan the map */
         fun onPanBegin()
+        /** Called when the user long-presses the map */
+        fun onLongPress(x: Float, y: Float)
     }
     private val listener: Listener? get() = parentFragment as? Listener ?: activity as? Listener
 
@@ -73,7 +87,26 @@ open class MapFragment : Fragment(),
         super.onViewCreated(view, savedInstanceState)
         mapView = view.findViewById(R.id.map)
         mapView.onCreate(savedInstanceState)
+
+        setupFittingToSystemWindowInsets()
+
         launch { initMap() }
+    }
+
+    private fun setupFittingToSystemWindowInsets() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+            view?.setOnApplyWindowInsetsListener { _, insets ->
+                openstreetmapLink.updateLayoutParams<ViewGroup.MarginLayoutParams> {
+                    setMargins(
+                        insets.systemWindowInsetLeft,
+                        insets.systemWindowInsetTop,
+                        insets.systemWindowInsetRight,
+                        insets.systemWindowInsetBottom
+                    )
+                }
+                insets
+            }
+        }
     }
 
     override fun onStart() {
@@ -112,16 +145,18 @@ open class MapFragment : Fragment(),
     /* ------------------------------------------- Map  ----------------------------------------- */
 
     private suspend fun initMap() {
-        val ctrl = mapView.initMap(createHttpHandler())!!
+        val ctrl = mapView.initMap(createHttpHandler())
         controller = ctrl
+        if (ctrl == null) return
         registerResponders()
-        onMapControllerReady()
-        restoreMapState()
 
         val sceneFilePath = getSceneFilePath()
         ctrl.loadSceneFile(sceneFilePath, getSceneUpdates())
         loadedSceneFilePath = sceneFilePath
-        onSceneReady()
+
+        ctrl.glViewHolder!!.view.awaitLayout()
+
+        onMapReady()
         listener?.onMapInitialized()
     }
 
@@ -145,18 +180,17 @@ open class MapFragment : Fragment(),
         controller?.setShoveResponder(this)
 
 
-        controller?.setMapChangeListener(object : MapChangeListener {
-            override fun onViewComplete() {}
-            override fun onRegionWillChange(animated: Boolean) {}
-            override fun onRegionIsChanging() {
+        controller?.setMapChangingListener(object : MapChangingListener {
+            override fun onMapWillChange() {}
+            override fun onMapIsChanging() {
                 val camera = cameraPosition ?: return
                 onMapIsChanging(camera.position, camera.rotation, camera.tilt, camera.zoom)
                 listener?.onMapIsChanging(camera.position, camera.rotation, camera.tilt, camera.zoom)
             }
-            override fun onRegionDidChange(animated: Boolean) {
+            override fun onMapDidChange() {
                 val camera = cameraPosition ?: return
-                onMapDidChange(camera.position, camera.rotation, camera.tilt, camera.zoom, animated)
-                listener?.onMapDidChange(camera.position, camera.rotation, camera.tilt, camera.zoom, animated)
+                onMapDidChange(camera.position, camera.rotation, camera.tilt, camera.zoom)
+                listener?.onMapDidChange(camera.position, camera.rotation, camera.tilt, camera.zoom)
             }
         })
     }
@@ -176,19 +210,43 @@ open class MapFragment : Fragment(),
         val cacheSize = PreferenceManager.getDefaultSharedPreferences(context).getInt(Prefs.MAP_TILECACHE_IN_MB, 50)
         val cacheDir = context!!.externalCacheDir
         val tileCacheDir: File?
-        tileCacheDir = cacheDir?.let { File(cacheDir, "tile_cache") }
-        return CachingHttpHandler(MAPZEN_API_KEY, tileCacheDir, (cacheSize * 1024L * 1024L))
+        if (cacheDir != null) {
+            tileCacheDir = File(cacheDir, "tile_cache")
+            if (!tileCacheDir.exists()) tileCacheDir.mkdir()
+        } else {
+            tileCacheDir = null
+        }
+
+        return object : DefaultHttpHandler() {
+
+            val cacheControl = CacheControl.Builder().maxStale(7, TimeUnit.DAYS).build()
+
+            override fun configureClient(builder: OkHttpClient.Builder) {
+                if (tileCacheDir?.exists() == true) {
+                    builder.cache(Cache(tileCacheDir, cacheSize * 1024L * 1024L))
+                }
+            }
+
+            override fun configureRequest(url: HttpUrl, builder: Request.Builder) {
+                if (MAPZEN_API_KEY != null)
+                    builder.url(url.newBuilder().addQueryParameter("api_key", MAPZEN_API_KEY).build())
+
+                builder
+                    .cacheControl(cacheControl)
+                    .header("User-Agent", ApplicationConstants.USER_AGENT + " / " + Version.userAgent())
+            }
+        }
     }
 
     /* ----------------------------- Overrideable map callbacks --------------------------------- */
 
-    protected open fun onMapControllerReady() {}
-
-    protected open fun onSceneReady() {}
+    @CallSuper protected open fun onMapReady() {
+        restoreMapState()
+    }
 
     protected open fun onMapIsChanging(position: LatLon, rotation: Float, tilt: Float, zoom: Float) {}
 
-    protected open fun onMapDidChange(position: LatLon, rotation: Float, tilt: Float, zoom: Float, animated: Boolean) {}
+    protected open fun onMapDidChange(position: LatLon, rotation: Float, tilt: Float, zoom: Float) {}
 
     /* ---------------------- Overrideable callbacks for map interaction ------------------------ */
 
@@ -218,9 +276,20 @@ open class MapFragment : Fragment(),
 
     override fun onSingleTapConfirmed(x: Float, y: Float): Boolean { return false }
 
-    override fun onDoubleTap(x: Float, y: Float): Boolean { return false }
+    override fun onDoubleTap(x: Float, y: Float): Boolean {
+        val pos = controller?.screenPositionToLatLon(PointF(x, y))
+        if (pos != null) {
+            controller?.updateCameraPosition(300L) {
+                zoomBy = 1f
+                position = pos
+            }
+        }
+        return true
+    }
 
-    override fun onLongPress(x: Float, y: Float) { }
+    override fun onLongPress(x: Float, y: Float) {
+        listener?.onLongPress(x, y)
+    }
 
     /* -------------------------------- Save and Restore State ---------------------------------- */
 
@@ -264,12 +333,6 @@ open class MapFragment : Fragment(),
     fun getPositionAt(point: PointF): LatLon? = controller?.screenPositionToLatLon(point)
 
     fun getPointOf(pos: LatLon): PointF? = controller?.latLonToScreenPosition(pos)
-
-    fun isPositionInView(pos: LatLon): Boolean {
-        val controller = controller ?: return false
-        val p = controller.latLonToScreenPosition(pos)
-        return p.x >= 0 && p.y >= 0 && p.x < mapView.width && p.y < mapView.height
-    }
 
     val cameraPosition: CameraPosition?
         get() = controller?.cameraPosition

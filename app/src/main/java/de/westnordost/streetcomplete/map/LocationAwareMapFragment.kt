@@ -1,20 +1,21 @@
 package de.westnordost.streetcomplete.map
 
+import android.annotation.SuppressLint
 import android.app.Activity
 import android.content.Context
 import android.graphics.PointF
 import android.hardware.SensorManager
 import android.location.Location
+import android.view.animation.DecelerateInterpolator
+import android.location.LocationManager
 import android.view.WindowManager
 import androidx.core.content.edit
-import com.mapzen.android.lost.api.LocationRequest
-import com.mapzen.android.lost.api.LocationServices
-import com.mapzen.android.lost.api.LostApiClient
 import com.mapzen.tangram.*
 import de.westnordost.osmapi.map.data.LatLon
 import de.westnordost.osmapi.map.data.OsmLatLon
 import de.westnordost.streetcomplete.R
 import de.westnordost.streetcomplete.ktx.toDp
+import de.westnordost.streetcomplete.location.FineLocationManager
 import de.westnordost.streetcomplete.util.BitmapUtil
 import de.westnordost.streetcomplete.map.tangram.Marker
 import de.westnordost.streetcomplete.util.EARTH_CIRCUMFERENCE
@@ -24,13 +25,16 @@ import kotlin.math.*
  *  the option to let the screen follow the location and rotation */
 open class LocationAwareMapFragment : MapFragment() {
 
-    private var locationProviderClient: LostApiClient? = null
-    private var compass: Compass? = null
+    private lateinit var compass: Compass
+    private lateinit var locationManager: FineLocationManager
 
     // markers showing the user's location, direction and accuracy of location
-    private var locationMarker: Marker? = null
-    private var accuracyMarker: Marker? = null
-    private var directionMarker: Marker? = null
+    protected var locationMarker: Marker? = null
+    private set
+    protected var accuracyMarker: Marker? = null
+    private set
+    protected var directionMarker: Marker? = null
+    private set
 
     /** The location of the GPS location dot on the map. Null if none (yet) */
     var displayedLocation: Location? = null
@@ -55,13 +59,23 @@ open class LocationAwareMapFragment : MapFragment() {
     private var zoomedYet = false
 
     /** Whether the view should automatically rotate with the compass (like during navigation) */
+    // Since the with-compass rotation happens with no animation, it's better to start the tilt
+    // animation abruptly and slide out, rather than sliding in and out (the default interpolator)
+    private val interpolator = DecelerateInterpolator()
     var isCompassMode: Boolean = false
         set(value) {
             field = value
             if (value) {
-                controller?.updateCameraPosition { tilt = PI.toFloat() / 5f }
+                controller?.updateCameraPosition(300, interpolator) { tilt = PI.toFloat() / 5f }
             }
         }
+
+    interface Listener {
+        /** Called after the map fragment updated its displayed location */
+        fun onLocationDidChange()
+    }
+    private val listener: Listener? get() = parentFragment as? Listener ?: activity as? Listener
+
 
     /* ------------------------------------ Lifecycle ------------------------------------------- */
 
@@ -72,19 +86,20 @@ open class LocationAwareMapFragment : MapFragment() {
             (context.getSystemService(Context.WINDOW_SERVICE) as WindowManager).defaultDisplay,
             this::onCompassRotationChanged
         )
-        locationProviderClient = LostApiClient.Builder(context)
-            .addConnectionCallbacks(LostConnectionCallbacks(this::onLocationProviderConnected))
-            .build()
+        locationManager = FineLocationManager(
+            context.getSystemService(Context.LOCATION_SERVICE) as LocationManager,
+            this::onLocationChanged
+        )
     }
 
     override fun onResume() {
         super.onResume()
-        compass?.onResume()
+        compass.onResume()
     }
 
     override fun onPause() {
         super.onPause()
-        compass?.onPause()
+        compass.onPause()
         saveMapState()
     }
 
@@ -95,7 +110,7 @@ open class LocationAwareMapFragment : MapFragment() {
 
     override fun onDestroy() {
         super.onDestroy()
-        compass?.onDestroy()
+        compass.onDestroy()
         controller = null
         locationMarker = null
         directionMarker = null
@@ -104,13 +119,9 @@ open class LocationAwareMapFragment : MapFragment() {
 
     /* ---------------------------------- Map State Callbacks ----------------------------------- */
 
-    override fun onMapControllerReady() {
-        super.onMapControllerReady()
+    override fun onMapReady() {
+        super.onMapReady()
         restoreMapState()
-    }
-
-    override fun onSceneReady() {
-        super.onSceneReady()
         initMarkers()
         followPosition()
         showLocation()
@@ -138,7 +149,7 @@ open class LocationAwareMapFragment : MapFragment() {
 
         val marker = controller?.addMarker() ?: return null
         marker.setStylingFromString(
-            "{ style: 'points', color: 'white', size: [${dotWidth}px, ${dotHeight}px], order: 2000, flat: true, collide: false }"
+            "{ style: 'points', color: 'white', size: [${dotWidth}px, ${dotHeight}px], order: 2000, flat: true, collide: false, interactive: true }"
         )
         marker.setDrawable(dot)
         marker.setDrawOrder(9)
@@ -202,9 +213,11 @@ open class LocationAwareMapFragment : MapFragment() {
 
     /* --------------------------------- Position tracking -------------------------------------- */
 
+    @SuppressLint("MissingPermission")
     fun startPositionTracking() {
-        val client = locationProviderClient ?: return
-        if (!client.isConnected) client.connect()
+        zoomedYet = false
+        displayedLocation = null
+        locationManager.requestUpdates(2000, 5f)
     }
 
     fun stopPositionTracking() {
@@ -214,13 +227,8 @@ open class LocationAwareMapFragment : MapFragment() {
 
         displayedLocation = null
         zoomedYet = false
-        isShowingDirection = false
 
-        val client = locationProviderClient ?: return
-        if (client.isConnected) {
-            LocationServices.FusedLocationApi.removeLocationUpdates(client, this::onLocationChanged)
-        }
-        client.disconnect()
+        locationManager.removeUpdates()
     }
 
     protected open fun shouldCenterCurrentPosition(): Boolean {
@@ -229,10 +237,10 @@ open class LocationAwareMapFragment : MapFragment() {
 
     protected fun followPosition() {
         if (!shouldCenterCurrentPosition()) return
-        val pos = displayedPosition ?: return
-
-        controller?.updateCameraPosition(500) {
-            position = pos
+        val controller = controller ?: return
+        val targetPosition = displayedPosition ?: return
+        controller.updateCameraPosition(600) {
+            position = targetPosition
             if (!zoomedYet) {
                 zoomedYet = true
                 zoom = 19f
@@ -240,22 +248,12 @@ open class LocationAwareMapFragment : MapFragment() {
         }
     }
 
-    private fun onLocationProviderConnected() {
-        zoomedYet = false
-        displayedLocation = null
-        val client = locationProviderClient ?: return
-        val request = LocationRequest.create()
-            .setInterval(2000)
-            .setSmallestDisplacement(5f)
-            .setPriority(LocationRequest.PRIORITY_HIGH_ACCURACY)
-        LocationServices.FusedLocationApi.requestLocationUpdates(client, request, this@LocationAwareMapFragment::onLocationChanged)
-    }
-
     private fun onLocationChanged(location: Location) {
         displayedLocation = location
-        compass?.setLocation(location)
+        compass.setLocation(location)
         showLocation()
         followPosition()
+        listener?.onLocationDidChange()
     }
 
     /* --------------------------------- Rotation tracking -------------------------------------- */
@@ -263,14 +261,16 @@ open class LocationAwareMapFragment : MapFragment() {
     private fun onCompassRotationChanged(rot: Float, tilt: Float) {
         // we received an event from the compass, so compass is working - direction can be displayed on screen
         isShowingDirection = true
-        directionMarker?.let {
-            if (!it.isVisible) it.isVisible = true
-            val angle = rot * 180 / PI
-            val size = directionMarkerSize
-            if (size != null) {
-                it.setStylingFromString(
-                    "{ style: 'points', color: '#cc536dfe', size: [${size.x}px, ${size.y}px], order: 2000, collide: false, flat: true, angle: $angle}"
-                )
+        if (displayedLocation != null) {
+            directionMarker?.let {
+                if (!it.isVisible) it.isVisible = true
+                val angle = rot * 180 / PI
+                val size = directionMarkerSize
+                if (size != null) {
+                    it.setStylingFromString(
+                        "{ style: 'points', color: '#cc536dfe', size: [${size.x}px, ${size.y}px], order: 2000, collide: false, flat: true, angle: $angle}"
+                    )
+                }
             }
         }
 
@@ -298,9 +298,4 @@ open class LocationAwareMapFragment : MapFragment() {
         const val PREF_FOLLOWING = "map_following"
         const val PREF_COMPASS_MODE = "map_compass_mode"
     }
-}
-
-private class LostConnectionCallbacks(val callback: () -> Unit) : LostApiClient.ConnectionCallbacks {
-    override fun onConnected() { callback() }
-    override fun onConnectionSuspended() {}
 }

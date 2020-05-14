@@ -3,22 +3,23 @@ package de.westnordost.streetcomplete.quests.recycling_material
 import de.westnordost.osmapi.map.data.BoundingBox
 import de.westnordost.osmapi.map.data.Element
 import de.westnordost.streetcomplete.R
-import de.westnordost.streetcomplete.data.osm.ElementGeometry
-import de.westnordost.streetcomplete.data.osm.OsmElementQuestType
+import de.westnordost.streetcomplete.data.osm.elementgeometry.ElementGeometry
+import de.westnordost.streetcomplete.data.osm.osmquest.OsmElementQuestType
 import de.westnordost.streetcomplete.data.osm.changes.StringMapChangesBuilder
-import de.westnordost.streetcomplete.data.osm.download.OverpassMapDataAndGeometryDao
-import de.westnordost.streetcomplete.data.osm.tql.getQuestPrintStatement
-import de.westnordost.streetcomplete.data.osm.tql.toGlobalOverpassBBox
+import de.westnordost.streetcomplete.data.osm.mapdata.OverpassMapDataAndGeometryApi
+import de.westnordost.streetcomplete.data.tagfilters.getQuestPrintStatement
+import de.westnordost.streetcomplete.data.tagfilters.toGlobalOverpassBBox
 
 class AddRecyclingContainerMaterials(
-    private val overpassServer: OverpassMapDataAndGeometryDao)
-    : OsmElementQuestType<List<String>> {
+    private val overpassApi: OverpassMapDataAndGeometryApi)
+    : OsmElementQuestType<RecyclingContainerMaterialsAnswer> {
 
     override val commitMessage = "Add recycled materials to container"
+    override val wikiLink = "Key:recycling"
     override val icon = R.drawable.ic_quest_recycling_materials
 
     override fun download(bbox: BoundingBox, handler: (element: Element, geometry: ElementGeometry?) -> Unit): Boolean {
-        return overpassServer.query(getOverpassQuery(bbox), handler)
+        return overpassApi.query(getOverpassQuery(bbox), handler)
     }
 
     private fun getOverpassQuery(bbox: BoundingBox) = """
@@ -39,17 +40,23 @@ class AddRecyclingContainerMaterials(
 
     override fun createForm() = AddRecyclingContainerMaterialsForm()
 
-    override fun applyAnswerTo(answer: List<String>, changes: StringMapChangesBuilder) {
-        for (accepted in answer) {
-            changes.add(accepted, "yes")
-        }
-        // if the user chosse deliberately not "all plastic", be explicit about it
-        if (answer.contains("recycling:plastic_packaging")) {
-            changes.add("recycling:plastic", "no")
-        }
-        if (answer.contains("recycling:plastic_bottles")) {
-            changes.add("recycling:plastic_packaging", "no")
-            changes.add("recycling:plastic", "no")
+    override fun applyAnswerTo(answer: RecyclingContainerMaterialsAnswer, changes: StringMapChangesBuilder) {
+        if (answer is RecyclingMaterials) {
+            val materials = answer.materials
+            for (accepted in materials) {
+                changes.add("recycling:$accepted", "yes")
+            }
+            // if the user chose deliberately not "all plastic", be explicit about it
+            if (materials.contains("plastic_packaging")) {
+                changes.add("recycling:plastic", "no")
+            }
+            if (materials.contains("plastic_bottles")) {
+                changes.add("recycling:plastic_packaging", "no")
+                changes.add("recycling:plastic", "no")
+            }
+        } else if(answer is IsWasteContainer) {
+            changes.modify("amenity","waste_disposal")
+            changes.delete("recycling_type")
         }
     }
 }

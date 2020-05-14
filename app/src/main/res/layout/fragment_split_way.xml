@@ -16,7 +16,6 @@
     <de.westnordost.streetcomplete.view.SlidingRelativeLayout
         android:layout_width="@dimen/quest_form_width"
         android:layout_height="match_parent"
-        android:background="@drawable/speechbubbles_gradient_background"
         android:id="@+id/bottomSheetContainer"
         >
 
@@ -97,9 +96,9 @@
 
         </RelativeLayout>
 
-        <Button
+        <TextView
             android:id="@+id/okButton"
-            android:text="@string/ok"
+            android:text="@android:string/ok"
             style="@style/RoundAccentButton"
             android:layout_width="72dp"
             android:layout_height="72dp"

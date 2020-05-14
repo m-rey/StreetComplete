@@ -4,12 +4,11 @@ import android.database.sqlite.SQLiteOpenHelper
 
 import javax.inject.Inject
 
-import de.westnordost.streetcomplete.data.osm.persist.WayTable
+import de.westnordost.streetcomplete.data.osm.mapdata.WayTable
 import de.westnordost.streetcomplete.quests.oneway.data.WayTrafficFlowTable.NAME
 import de.westnordost.streetcomplete.quests.oneway.data.WayTrafficFlowTable.Columns.WAY_ID
 import de.westnordost.streetcomplete.quests.oneway.data.WayTrafficFlowTable.Columns.IS_FORWARD
 
-import android.database.sqlite.SQLiteDatabase.*
 import androidx.core.content.contentValuesOf
 import de.westnordost.streetcomplete.ktx.getInt
 import de.westnordost.streetcomplete.ktx.queryOne
